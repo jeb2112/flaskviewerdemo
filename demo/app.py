@@ -47,6 +47,7 @@ current_images = {
     'last_click_y': None,   # Store last clicked y coordinate
     'transform_left': None,  # Store transform for left image
     'transform_right': None,  # Store transform for right image
+    'click_coordinates': [],  # List to store all click coordinates
     'norm_params': None  # Storage for per-slice normalization parameters
 }
 
@@ -162,10 +163,11 @@ def load_images():
         img2 = nib.load(full_path2)
         print("Images loaded successfully", flush=True)
         
-        # Store image data
+        # Store image data and rotate by 90 degrees
         with current_images['lock']:
-            current_images['image1'] = np.array(img1.dataobj)
-            current_images['image2'] = np.array(img2.dataobj)
+            # Rotate images by 90 degrees
+            current_images['image1'] = scipy.ndimage.rotate(np.array(img1.dataobj), -90, reshape=False)
+            current_images['image2'] = scipy.ndimage.rotate(np.array(img2.dataobj), -90, reshape=False)
             current_images['num_slices'] = current_images['image1'].shape[2]
             current_images['current_slice'] = 25
             current_images['mask'] = np.zeros_like(current_images['image1'], dtype=bool)
@@ -298,68 +300,58 @@ def update_threshold():
     data = request.get_json()
     threshold = data.get('threshold', current_images['threshold'])
     
-    if threshold < 0.1 or threshold > 4.0:
+    if threshold < 0.1 or threshold > 6.0:
         return jsonify({"error": "Invalid threshold value"}), 400
     
     with current_images['lock']:
         current_images['threshold'] = threshold
         
-        # If we have last clicked coordinates, recalculate the mask
-        if current_images['last_click_x'] is not None and current_images['last_click_y'] is not None:
-            print(f"Recalculating mask with new threshold {threshold} at coordinates ({current_images['last_click_x']}, {current_images['last_click_y']})")
+        # If we have click coordinates, recalculate the mask for all clicks
+        if current_images['click_coordinates']:
+            print(f"Recalculating mask with new threshold {threshold} for all clicks")
             
-            # Create new mask with updated threshold
-            if current_images['neighbor_mode']:
-                new_mask = create_neighbor_mask(current_images['last_click_x'], current_images['last_click_y'])
-            else:
-                new_mask = create_threshold_mask(current_images['last_click_x'], current_images['last_click_y'])
-                
-            # Update current mask using |= to preserve other clicked points
-            current_images['mask'][:, :, current_images['current_slice']] |= new_mask
-            print("Mask updated with new threshold")
+            # Clear the current slice's mask
+            current_images['mask'][:, :, current_images['current_slice']] = False
+            
+            # Recalculate mask for each click
+            for x, y in current_images['click_coordinates']:
+                if current_images['neighbor_mode']:
+                    new_mask = create_neighbor_mask(x, y)
+                else:
+                    new_mask = create_threshold_mask(x, y)
+                current_images['mask'][:, :, current_images['current_slice']] |= new_mask
+            
+            print(f"Mask updated with new threshold for {len(current_images['click_coordinates'])} clicks")
     
     return jsonify({"message": "Threshold updated successfully"})
 
 @app.route('/add_to_mask', methods=['POST'])
 def add_to_mask():
-    print("Received add_to_mask request")
-    try:
-        data = request.get_json()
-        print("Request data:", data)
-        x = data.get('x')
-        y = data.get('y')
+    data = request.get_json()
+    x = data.get('x')
+    y = data.get('y')
+    
+    if x is None or y is None:
+        return jsonify({"error": "Missing coordinates"}), 400
         
-        if x is None or y is None:
-            print("Missing coordinates")
-            return jsonify({"error": "Missing coordinates"}), 400
-            
-        print(f"Processing coordinates: x={x}, y={y}")
-        
-        with current_images['lock']:
-            # Store last clicked coordinates
-            current_images['last_click_x'] = x
-            current_images['last_click_y'] = y
-            
-            # Save current mask for undo
-            current_images['undo_stack'].append(current_images['mask'].copy())
-            
-            # Create mask based on threshold and neighbor mode
-            if current_images['neighbor_mode']:
-                print("Using neighbor mode")
-                new_mask = create_neighbor_mask(x, y)
-            else:
-                print("Using threshold mode")
-                new_mask = create_threshold_mask(x, y)
-            
-            # Update current mask for this slice
-            slice_idx = current_images['current_slice']
-            current_images['mask'][:, :, slice_idx] |= new_mask
-            print("Mask updated successfully")
-        
-        return jsonify({"message": "Mask updated successfully"})
-    except Exception as e:
-        print("Error in add_to_mask:", str(e))
-        return jsonify({"error": str(e)}), 500
+    print(f"Received click at ({x}, {y})", flush=True)
+    
+    # Store the click coordinates
+    current_images['click_coordinates'].append((x, y))
+    current_images['last_click_x'] = x
+    current_images['last_click_y'] = y
+    
+    # Create new mask
+    if current_images['neighbor_mode']:
+        new_mask = create_neighbor_mask(x, y)
+    else:
+        new_mask = create_threshold_mask(x, y)
+    
+    # Update current mask for this slice
+    slice_idx = current_images['current_slice']
+    current_images['mask'][:, :, slice_idx] |= new_mask
+    
+    return jsonify({"message": "Mask updated successfully"})
 
 @app.route('/undo', methods=['POST'])
 def undo():
@@ -397,6 +389,16 @@ def save_mask():
         except Exception as e:
             return jsonify({"error": str(e)}), 500
 
+@app.route('/clear_mask', methods=['POST'])
+def clear_mask():
+    """Clear the current mask"""
+    with current_images['lock']:
+        current_images['mask'] = np.zeros_like(current_images['image1'], dtype=bool)
+        current_images['click_coordinates'] = []  # Clear stored click coordinates
+        current_images['last_click_x'] = None
+        current_images['last_click_y'] = None
+    return jsonify({"message": "Mask cleared successfully"})
+
 def create_threshold_mask(x, y):
     """Create mask based on intensity threshold"""
     slice_idx = current_images['current_slice']
@@ -408,17 +410,18 @@ def create_threshold_mask(x, y):
     print(f"Input screen coordinates: x={x}, y={y}")
     
     # Save debugging image showing original and normalized versions
-    plt.figure(figsize=(12, 6))
-    plt.subplot(121)
-    plt.imshow(current_images['image1'][:, :, slice_idx], cmap='gray', origin='upper')
-    plt.title('Original Image1')
-    plt.colorbar()
-    plt.subplot(122)
-    plt.imshow(current_images['image1_normalized'][:, :, slice_idx], cmap='gray', origin='upper')
-    plt.title('Normalized Image1')
-    plt.colorbar()
-    plt.savefig(os.path.expanduser('~/Pictures/debug_slice.png'))
-    plt.close()
+    if False:
+        plt.figure(figsize=(12, 6))
+        plt.subplot(121)
+        plt.imshow(current_images['image1'][:, :, slice_idx], cmap='gray', origin='upper')
+        plt.title('Original Image1')
+        plt.colorbar()
+        plt.subplot(122)
+        plt.imshow(current_images['image1_normalized'][:, :, slice_idx], cmap='gray', origin='upper')
+        plt.title('Normalized Image1')
+        plt.colorbar()
+        plt.savefig(os.path.expanduser('~/Pictures/debug_slice.png'))
+        plt.close()
     
     # Scale factor used in display
     scale_factor = 2.0
@@ -464,6 +467,7 @@ def create_threshold_mask(x, y):
     
     # Create final mask with only the clicked component
     mask = labeled_array == clicked_label
+    
     print(f"Created mask with {np.sum(mask)} pixels")
     return mask
 

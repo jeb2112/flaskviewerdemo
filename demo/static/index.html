@@ -122,8 +122,8 @@
                 <input type="range" class="form-range" id="sliceSlider" min="0" max="0" value="0">
             </div>
             <div class="slider-container">
-                <label for="thresholdSlider" class="form-label">Threshold: <span id="thresholdValue">1.0</span></label>
-                <input type="range" class="form-range threshold-slider" id="thresholdSlider" min="0.25" max="6.0" step="0.25" value="1">
+                <label for="thresholdSlider" class="form-label">Threshold: <span id="thresholdValue">2.0</span></label>
+                <input type="range" class="form-range threshold-slider" id="thresholdSlider" min="0.25" max="6.0" step="0.25" value="2">
             </div>
             
             <!-- Mask Controls -->
@@ -546,6 +546,27 @@
             }
             updateThreshold();
         });
+
+        function clearMask() {
+            fetch('/clear_mask', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    console.error('Error clearing mask:', data.error);
+                    return;
+                }
+                console.log('Mask cleared successfully');
+                loadSlice(currentSlice);  // Refresh the display to show cleared mask
+            })
+            .catch(error => {
+                console.error('Error:', error);
+            });
+        }
     </script>
 </body>
 </html>
