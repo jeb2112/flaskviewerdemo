@@ -341,6 +341,9 @@ def add_to_mask():
     current_images['last_click_x'] = x
     current_images['last_click_y'] = y
     
+    # Save current mask state for undo
+    current_images['undo_stack'].append(current_images['mask'].copy())
+    
     # Create new mask
     if current_images['neighbor_mode']:
         new_mask = create_neighbor_mask(x, y)
@@ -355,11 +358,29 @@ def add_to_mask():
 
 @app.route('/undo', methods=['POST'])
 def undo():
-    with current_images['lock']:
-        if current_images['undo_stack']:
+    """Undo the last mask operation"""
+    try:
+        with current_images['lock']:
+            if not current_images['undo_stack']:
+                return jsonify({"error": "Nothing to undo"}), 400
+                
+            # Restore the previous mask state
             current_images['mask'] = current_images['undo_stack'].pop()
+            
+            # If we're undoing a click, remove the last click coordinates
+            if current_images['click_coordinates']:
+                current_images['click_coordinates'].pop()
+                if current_images['click_coordinates']:
+                    current_images['last_click_x'], current_images['last_click_y'] = current_images['click_coordinates'][-1]
+                else:
+                    current_images['last_click_x'] = None
+                    current_images['last_click_y'] = None
+            
+            print("Undo successful - restored previous mask state")
             return jsonify({"message": "Undo successful"})
-    return jsonify({"error": "Nothing to undo"}), 400
+    except Exception as e:
+        print("Error in undo:", str(e))
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/toggle_neighbor_mode', methods=['POST'])
 def toggle_neighbor_mode():
