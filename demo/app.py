@@ -444,8 +444,6 @@ def create_threshold_mask(x, y):
     # Get image dimensions
     height, width = current_images['image1_normalized'].shape[:2]
     num_slices = current_images['image1_normalized'].shape[2]
-    print(f"Image dimensions: {height}x{width}x{num_slices}")
-    print(f"Input screen coordinates: x={x}, y={y}")
     
     # Scale factor used in display
     scale_factor = 2.0
@@ -455,24 +453,18 @@ def create_threshold_mask(x, y):
     is_right_image = x >= scaled_width
     if is_right_image:
         x -= scaled_width
-        print(f"Click on right image (adjusted x: {x})")
-    else:
-        print(f"Click on left image (x: {x})")
     
     # Convert display coordinates to data coordinates
     img_x = int(x / scale_factor)
     img_y = int(y / scale_factor)
-    print(f"Mapped to image coordinates: x={img_x}, y={img_y}")
     
     # Ensure coordinates are within bounds
     if not (0 <= img_x < width and 0 <= img_y < height):
-        print(f"Coordinates ({img_x}, {img_y}) out of bounds for image dimensions {width}x{height}")
         return np.zeros((height, width, num_slices), dtype=bool)
     
     # Get reference values at clicked point
     val1 = current_images['image1_normalized'][:, :, slice_idx][img_y, img_x]
     val2 = current_images['image2_normalized'][:, :, slice_idx][img_y, img_x]
-    print(f"Reference values at ({img_x}, {img_y}): val1={val1:.3f}, val2={val2:.3f}")
     
     # Create differences for the entire volume
     diff1 = np.abs(current_images['image1_normalized'] - val1)
@@ -486,7 +478,6 @@ def create_threshold_mask(x, y):
     clicked_label = labeled_array[img_y, img_x, slice_idx]
     
     if clicked_label == 0:
-        print("Clicked point is not in any connected component")
         return np.zeros((height, width, num_slices), dtype=bool)
     
     # Create final 3D mask with only the clicked component
@@ -495,7 +486,6 @@ def create_threshold_mask(x, y):
     # Fill holes in the entire 3D mask
     volume_mask = fill_mask(volume_mask)
     
-    print(f"Created mask with {np.sum(volume_mask)} pixels across all slices")
     return volume_mask
 
 def create_neighbor_mask(x, y):
