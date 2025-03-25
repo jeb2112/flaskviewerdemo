@@ -16,6 +16,7 @@ from sklearn.cluster import KMeans
 from threading import Thread
 from queue import Queue
 import time
+import scipy.ndimage
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--host", type=str, default="localhost")
@@ -36,7 +37,7 @@ current_images = {
     'image2_normalized': None,
     'current_slice': 0,
     'num_slices': 0,
-    'threshold': 0.4,
+    'threshold': 1.0,
     'mask': None,  # Current mask being drawn
     'saved_masks': [],  # List of saved masks
     'undo_stack': [],  # Stack for undo operations
@@ -166,7 +167,7 @@ def load_images():
             current_images['image1'] = np.array(img1.dataobj)
             current_images['image2'] = np.array(img2.dataobj)
             current_images['num_slices'] = current_images['image1'].shape[2]
-            current_images['current_slice'] = current_images['num_slices'] // 2
+            current_images['current_slice'] = 25
             current_images['mask'] = np.zeros_like(current_images['image1'], dtype=bool)
         
         # Reset processing status
@@ -237,21 +238,21 @@ def get_slice():
         ax1.set_position([0, 0, 0.5, 1.0])  # Left half
         ax2.set_position([0.5, 0, 0.5, 1.0])  # Right half
         
-        # Display normalized images
+        # Display normalized images with upper origin to match screen coordinates
         ax1.imshow(current_images['image1_normalized'][:, :, slice_idx], 
                   cmap='gray',
                   interpolation='none',
-                  origin='lower')
+                  origin='upper')
         ax2.imshow(current_images['image2_normalized'][:, :, slice_idx], 
                   cmap='gray',
                   interpolation='none',
-                  origin='lower')
+                  origin='upper')
         
         # Set the axes limits explicitly
         ax1.set_xlim(0, width)
-        ax1.set_ylim(0, height)
+        ax1.set_ylim(height, 0)  # Note: reversed y limits for upper origin
         ax2.set_xlim(0, width)
-        ax2.set_ylim(0, height)
+        ax2.set_ylim(height, 0)  # Note: reversed y limits for upper origin
         
         # Store the transforms for coordinate conversion
         current_images['transform_left'] = ax1.transData + ax1.transAxes.inverted()
@@ -264,8 +265,8 @@ def get_slice():
                 mask_overlay = np.zeros((*mask_slice.shape, 4))
                 mask_overlay[mask_slice, 0] = 1  # Red channel
                 mask_overlay[mask_slice, 3] = 0.5  # Alpha channel
-                ax1.imshow(mask_overlay, interpolation='none', origin='lower')
-                ax2.imshow(mask_overlay, interpolation='none', origin='lower')
+                ax1.imshow(mask_overlay, interpolation='none', origin='upper')
+                ax2.imshow(mask_overlay, interpolation='none', origin='upper')
         
         ax1.axis('off')
         ax2.axis('off')
@@ -297,7 +298,7 @@ def update_threshold():
     data = request.get_json()
     threshold = data.get('threshold', current_images['threshold'])
     
-    if threshold < 0.1 or threshold > 1.1:
+    if threshold < 0.1 or threshold > 4.0:
         return jsonify({"error": "Invalid threshold value"}), 400
     
     with current_images['lock']:
@@ -406,6 +407,19 @@ def create_threshold_mask(x, y):
     print(f"Image dimensions: {height}x{width}")
     print(f"Input screen coordinates: x={x}, y={y}")
     
+    # Save debugging image showing original and normalized versions
+    plt.figure(figsize=(12, 6))
+    plt.subplot(121)
+    plt.imshow(current_images['image1'][:, :, slice_idx], cmap='gray', origin='upper')
+    plt.title('Original Image1')
+    plt.colorbar()
+    plt.subplot(122)
+    plt.imshow(current_images['image1_normalized'][:, :, slice_idx], cmap='gray', origin='upper')
+    plt.title('Normalized Image1')
+    plt.colorbar()
+    plt.savefig(os.path.expanduser('~/Pictures/debug_slice.png'))
+    plt.close()
+    
     # Scale factor used in display
     scale_factor = 2.0
     scaled_width = int(width * scale_factor)  # Width in display space
@@ -437,11 +451,19 @@ def create_threshold_mask(x, y):
     diff1 = np.abs(current_images['image1_normalized'][:, :, slice_idx] - val1)
     diff2 = np.abs(current_images['image2_normalized'][:, :, slice_idx] - val2)
     
-    # Create mask
-    mask = np.zeros((height, width), dtype=bool)
-    mask_slice = (diff1 <= threshold) & (diff2 <= threshold)
-    mask[mask_slice] = True
+    # Create initial mask
+    initial_mask = (diff1 <= threshold) & (diff2 <= threshold)
     
+    # Find connected components and keep only the one containing the clicked point
+    labeled_array, num_features = scipy.ndimage.label(initial_mask)
+    clicked_label = labeled_array[img_y, img_x]
+    
+    if clicked_label == 0:
+        print("Clicked point is not in any connected component")
+        return np.zeros((height, width), dtype=bool)
+    
+    # Create final mask with only the clicked component
+    mask = labeled_array == clicked_label
     print(f"Created mask with {np.sum(mask)} pixels")
     return mask
 
