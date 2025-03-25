@@ -17,6 +17,7 @@ from threading import Thread
 from queue import Queue
 import time
 import scipy.ndimage
+from scipy.ndimage import binary_dilation, binary_fill_holes
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--host", type=str, default="localhost")
@@ -165,9 +166,9 @@ def load_images():
         
         # Store image data and rotate by 90 degrees
         with current_images['lock']:
-            # Rotate images by 90 degrees
-            current_images['image1'] = scipy.ndimage.rotate(np.array(img1.dataobj), -90, reshape=False)
-            current_images['image2'] = scipy.ndimage.rotate(np.array(img2.dataobj), -90, reshape=False)
+            # Rotate images by 90 degrees using np.rot90
+            current_images['image1'] = np.rot90(np.array(img1.dataobj), k=-1)
+            current_images['image2'] = np.rot90(np.array(img2.dataobj), k=-1)
             current_images['num_slices'] = current_images['image1'].shape[2]
             current_images['current_slice'] = 25
             current_images['mask'] = np.zeros_like(current_images['image1'], dtype=bool)
@@ -310,16 +311,20 @@ def update_threshold():
         if current_images['click_coordinates']:
             print(f"Recalculating mask with new threshold {threshold} for all clicks")
             
-            # Clear the current slice's mask
-            current_images['mask'][:, :, current_images['current_slice']] = False
+            # Clear the entire mask
+            current_images['mask'] = np.zeros_like(current_images['image1'], dtype=bool)
             
             # Recalculate mask for each click
             for x, y in current_images['click_coordinates']:
                 if current_images['neighbor_mode']:
                     new_mask = create_neighbor_mask(x, y)
+                    # For neighbor mode, we still only update the current slice
+                    slice_idx = current_images['current_slice']
+                    current_images['mask'][:, :, slice_idx] |= new_mask
                 else:
+                    # For threshold mode, we get the full 3D mask
                     new_mask = create_threshold_mask(x, y)
-                current_images['mask'][:, :, current_images['current_slice']] |= new_mask
+                    current_images['mask'] |= new_mask
             
             print(f"Mask updated with new threshold for {len(current_images['click_coordinates'])} clicks")
     
@@ -347,12 +352,13 @@ def add_to_mask():
     # Create new mask
     if current_images['neighbor_mode']:
         new_mask = create_neighbor_mask(x, y)
+        # For neighbor mode, we still only update the current slice
+        slice_idx = current_images['current_slice']
+        current_images['mask'][:, :, slice_idx] |= new_mask
     else:
+        # For threshold mode, we get the full 3D mask
         new_mask = create_threshold_mask(x, y)
-    
-    # Update current mask for this slice
-    slice_idx = current_images['current_slice']
-    current_images['mask'][:, :, slice_idx] |= new_mask
+        current_images['mask'] |= new_mask
     
     return jsonify({"message": "Mask updated successfully"})
 
@@ -401,8 +407,11 @@ def save_mask():
             return jsonify({"error": "No mask to save"}), 400
             
         try:
+            # Rotate mask back to original orientation before saving
+            mask_to_save = np.rot90(current_images['mask'], k=1)
+            
             # Create NIfTI image from mask
-            mask_nifti = nib.Nifti1Image(current_images['mask'].astype(np.uint8), np.eye(4))
+            mask_nifti = nib.Nifti1Image(mask_to_save.astype(np.uint8), np.eye(4))
             # Save to file
             output_path = os.path.join(args.datadir, mask_name)
             nib.save(mask_nifti, output_path)
@@ -420,6 +429,13 @@ def clear_mask():
         current_images['last_click_y'] = None
     return jsonify({"message": "Mask cleared successfully"})
 
+def fill_mask(mask):
+    """Fill holes in the mask"""
+    # Dilate mask with 3D structure element
+    strel = np.ones((3,3,3))  # 3D structure element
+    dilated_mask = binary_dilation(mask, strel)
+    return binary_fill_holes(dilated_mask)
+
 def create_threshold_mask(x, y):
     """Create mask based on intensity threshold"""
     slice_idx = current_images['current_slice']
@@ -427,22 +443,9 @@ def create_threshold_mask(x, y):
     
     # Get image dimensions
     height, width = current_images['image1_normalized'].shape[:2]
-    print(f"Image dimensions: {height}x{width}")
+    num_slices = current_images['image1_normalized'].shape[2]
+    print(f"Image dimensions: {height}x{width}x{num_slices}")
     print(f"Input screen coordinates: x={x}, y={y}")
-    
-    # Save debugging image showing original and normalized versions
-    if False:
-        plt.figure(figsize=(12, 6))
-        plt.subplot(121)
-        plt.imshow(current_images['image1'][:, :, slice_idx], cmap='gray', origin='upper')
-        plt.title('Original Image1')
-        plt.colorbar()
-        plt.subplot(122)
-        plt.imshow(current_images['image1_normalized'][:, :, slice_idx], cmap='gray', origin='upper')
-        plt.title('Normalized Image1')
-        plt.colorbar()
-        plt.savefig(os.path.expanduser('~/Pictures/debug_slice.png'))
-        plt.close()
     
     # Scale factor used in display
     scale_factor = 2.0
@@ -464,33 +467,36 @@ def create_threshold_mask(x, y):
     # Ensure coordinates are within bounds
     if not (0 <= img_x < width and 0 <= img_y < height):
         print(f"Coordinates ({img_x}, {img_y}) out of bounds for image dimensions {width}x{height}")
-        return np.zeros((height, width), dtype=bool)
+        return np.zeros((height, width, num_slices), dtype=bool)
     
     # Get reference values at clicked point
     val1 = current_images['image1_normalized'][:, :, slice_idx][img_y, img_x]
     val2 = current_images['image2_normalized'][:, :, slice_idx][img_y, img_x]
     print(f"Reference values at ({img_x}, {img_y}): val1={val1:.3f}, val2={val2:.3f}")
     
-    # Create differences
-    diff1 = np.abs(current_images['image1_normalized'][:, :, slice_idx] - val1)
-    diff2 = np.abs(current_images['image2_normalized'][:, :, slice_idx] - val2)
+    # Create differences for the entire volume
+    diff1 = np.abs(current_images['image1_normalized'] - val1)
+    diff2 = np.abs(current_images['image2_normalized'] - val2)
     
-    # Create initial mask
-    initial_mask = (diff1 <= threshold) & (diff2 <= threshold)
+    # Create initial 3D mask
+    initial_volume_mask = (diff1 <= threshold) & (diff2 <= threshold)
     
-    # Find connected components and keep only the one containing the clicked point
-    labeled_array, num_features = scipy.ndimage.label(initial_mask)
-    clicked_label = labeled_array[img_y, img_x]
+    # Find connected components in 3D
+    labeled_array, num_features = scipy.ndimage.label(initial_volume_mask, structure=np.ones((3,3,3)))
+    clicked_label = labeled_array[img_y, img_x, slice_idx]
     
     if clicked_label == 0:
         print("Clicked point is not in any connected component")
-        return np.zeros((height, width), dtype=bool)
+        return np.zeros((height, width, num_slices), dtype=bool)
     
-    # Create final mask with only the clicked component
-    mask = labeled_array == clicked_label
+    # Create final 3D mask with only the clicked component
+    volume_mask = labeled_array == clicked_label
     
-    print(f"Created mask with {np.sum(mask)} pixels")
-    return mask
+    # Fill holes in the entire 3D mask
+    volume_mask = fill_mask(volume_mask)
+    
+    print(f"Created mask with {np.sum(volume_mask)} pixels across all slices")
+    return volume_mask
 
 def create_neighbor_mask(x, y):
     """Create mask including neighboring points"""
